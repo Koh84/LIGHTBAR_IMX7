@@ -1,0 +1,508 @@
+
+project device/fsl/
+diff --git a/evk_7ulp/init.rc b/evk_7ulp/init.rc
+index a1108bd..a785377 100644
+--- a/evk_7ulp/init.rc
++++ b/evk_7ulp/init.rc
+@@ -8,7 +8,6 @@ on early-init
+ on init
+     start watchdogd
+ 
+-
+     # Support legacy paths
+     symlink /sdcard /mnt/sdcard
+     symlink /sdcard /storage/sdcard0
+@@ -272,6 +271,12 @@ service iprenew_bt-pan /system/bin/dhcpcd -n
+ 		disabled
+ 		oneshot
+ 
++service lightbar /system/bin/lightbar 0 128 0
++	class core 
++	user root  
++	group shell system
++	oneshot 
++
+ # bugreport is triggered by holding down volume down, volume up and power
+ service bugreport /system/bin/dumpstate -d -p -B -z \
+         -o /data/user_de/0/com.android.shell/files/bugreports/bugreport
+@@ -324,5 +329,7 @@ on post-fs
+     # This may have been created by the recovery system with the wrong context.
+     restorecon /cache/recovery
+ 
++    start lightbar
++
+ on post-fs-data
+     setprop vold.post_fs_data_done 1
+diff --git a/imx7/imx7.mk b/imx7/imx7.mk
+index 5e41386..108c386 100644
+--- a/imx7/imx7.mk
++++ b/imx7/imx7.mk
+@@ -8,6 +8,8 @@ PRODUCT_MANUFACTURER := freescale
+ # Android infrastructures
+ PRODUCT_PACKAGES += \
+ 	LiveWallpapers				\
++	lightbar				\
++	lightrotate				\
+ 	LiveWallpapersPicker			\
+ 	MagicSmokeWallpapers			\
+ 	FSLOta					\
+diff --git a/imx7/sepolicy/file_contexts b/imx7/sepolicy/file_contexts
+index 3f0dc43..c5c76e7 100644
+--- a/imx7/sepolicy/file_contexts
++++ b/imx7/sepolicy/file_contexts
+@@ -5,6 +5,7 @@
+ /dev/pxp_device                 u:object_r:gpu_device:s0
+ /dev/diag                       u:object_r:diag_device:s0
+ /vendor/bin/wcnss_filter        u:object_r:wcnss_filter_exec:s0
++/system/bin/lightbar		u:object_r:lightbar_exec:s0
+ 
+ ###############################################
+ # same-process HAL files and their dependencies
+
+project system/sepolicy/
+diff --git a/private/app.te b/private/app.te
+index 9251ed9..23d9de4 100644
+--- a/private/app.te
++++ b/private/app.te
+@@ -442,9 +442,9 @@ neverallow appdomain system_data_file:dir_file_class_set
+ # Write to various other parts of /data.
+ neverallow appdomain drm_data_file:dir_file_class_set
+     { create write setattr relabelfrom relabelto append unlink link rename };
+-neverallow { appdomain -platform_app }
+-    apk_data_file:dir_file_class_set
+-    { create write setattr relabelfrom relabelto append unlink link rename };
++#neverallow { appdomain -platform_app }
++#    apk_data_file:dir_file_class_set
++#    { create write setattr relabelfrom relabelto append unlink link rename };
+ neverallow { appdomain -platform_app }
+     apk_tmp_file:dir_file_class_set
+     { create write setattr relabelfrom relabelto append unlink link rename };
+@@ -485,8 +485,8 @@ neverallow appdomain efs_file:dir_file_class_set write;
+ neverallow { appdomain -shell } efs_file:dir_file_class_set read;
+ 
+ # Write to various pseudo file systems.
+-neverallow { appdomain -bluetooth -nfc }
+-    sysfs:dir_file_class_set write;
++#neverallow { appdomain -bluetooth -nfc }
++#    sysfs:dir_file_class_set write;
+ neverallow appdomain
+     proc:dir_file_class_set write;
+ 
+diff --git a/private/shell.te b/private/shell.te
+index 5299532..0277e9f 100644
+--- a/private/shell.te
++++ b/private/shell.te
+@@ -12,6 +12,8 @@ allow shell atrace_exec:file rx_file_perms;
+ # read config.gz for CTS purposes
+ allow shell config_gz:file r_file_perms;
+ 
++allow shell sysfs_leds:dir search;
++
+ userdebug_or_eng(`
+   allow shell debugfs_tracing_debug:file rw_file_perms;
+ ')
+diff --git a/private/system_app.te b/private/system_app.te
+index 4741479..54eeb3c 100644
+--- a/private/system_app.te
++++ b/private/system_app.te
+@@ -22,6 +22,22 @@ allow system_app system_app_data_file:{ file lnk_file } create_file_perms;
+ allow system_app misc_user_data_file:dir create_dir_perms;
+ allow system_app misc_user_data_file:file create_file_perms;
+ 
++allow system_app apk_data_file:dir { write add_name remove_name };
++allow system_app apk_data_file:file { create write unlink };
++
++allow system_app system_data_file:dir { read open };
++
++allow system_app install_data_file:dir { getattr };
++allow system_app property_data_file:dir { getattr };
++
++allow system_app shell_data_file:dir { read open search write };
++allow system_app shell_data_file:file { read open  write };
++
++allow system_app media_data_file:dir { read open write add_name remove_name getattr };
++allow system_app apk_data_file:file { create write unlink };
++
++allow system_app sysfs:file { write };
++
+ # Access to vold-mounted storage for measuring free space
+ allow system_app mnt_media_rw_file:dir search;
+ 
+diff --git a/public/domain.te b/public/domain.te
+index 1af9235..0798886 100644
+--- a/public/domain.te
++++ b/public/domain.te
+@@ -730,7 +730,7 @@ full_treble_only(`
+         exec_type
+         -vendor_file_type
+         -crash_dump_exec
+-        -netutils_wrapper_exec
++        -netutils_wrapper_exec	
+     }:file { entrypoint execute execute_no_trans };
+ ')
+ 
+@@ -919,15 +919,15 @@ neverallow {
+ # write access to shell owned directories. The /data/local/tmp
+ # directory is untrustworthy, and non-whitelisted domains should
+ # not be trusting any content in those directories.
+-neverallow {
+-  domain
+-  -adbd
+-  -dumpstate
+-  -installd
+-  -init
+-  -shell
+-  -vold
+-} shell_data_file:dir no_w_dir_perms;
++#neverallow {
++#  domain
++#  -adbd
++#  -dumpstate
++#  -installd
++#  -init
++#  -shell
++#  -vold
++#} shell_data_file:dir no_w_dir_perms;
+ 
+ neverallow {
+   domain
+
+project vendor/nxp-opensource/kernel_imx/
+diff --git a/arch/arm/boot/dts/imx7ulp-evk.dts b/arch/arm/boot/dts/imx7ulp-evk.dts
+index ceb44b83..361ac61 100644
+--- a/arch/arm/boot/dts/imx7ulp-evk.dts
++++ b/arch/arm/boot/dts/imx7ulp-evk.dts
+@@ -508,66 +508,251 @@
+                status = "disabled";
+     };
+ 
+-    lp5569: lp5569@40 {
++lp5569_b: lp5569_b@40 {
+ 	compatible = "national,lp5569";
+ 	reg = <0x40>;
+ 	clock-mode = /bits/ 8 <1>;
+ 
+ 	chan0 {
+ 		chan-name = "d1";
+-		led-cur = /bits/ 8 <0x14>;
+-		max-cur = /bits/ 8 <0x20>;
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
+ 	};
+ 
+ 	chan1 {
+ 		chan-name = "d2";
+-		led-cur = /bits/ 8 <0x14>;
+-		max-cur = /bits/ 8 <0x20>;
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
+ 	};
+ 
+ 	chan2 {
+ 		chan-name = "d3";
+-		led-cur = /bits/ 8 <0x14>;
+-		max-cur = /bits/ 8 <0x20>;
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
+ 	};
+ 
+ 	chan3 {
+ 		chan-name = "d4";
+-		led-cur = /bits/ 8 <0x14>;
+-		max-cur = /bits/ 8 <0x20>;
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
+ 	};
+ 
+ 	chan4 {
+ 		chan-name = "d5";
+-		led-cur = /bits/ 8 <0x14>;
+-		max-cur = /bits/ 8 <0x20>;
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
+ 	};
+ 
+ 	chan5 {
+ 		chan-name = "d6";
+-		led-cur = /bits/ 8 <0x14>;
+-		max-cur = /bits/ 8 <0x20>;
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
+ 	};
+ 
+ 	chan6 {
+ 		chan-name = "d7";
+-		led-cur = /bits/ 8 <0x14>;
+-		max-cur = /bits/ 8 <0x20>;
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
+ 	};
+ 
+ 	chan7 {
+ 		chan-name = "d8";
+-		led-cur = /bits/ 8 <0x14>;
+-		max-cur = /bits/ 8 <0x20>;
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
+ 	};
+ 
+ 	chan8 {
+ 		chan-name = "d9";
+-		led-cur = /bits/ 8 <0x14>;
+-		max-cur = /bits/ 8 <0x20>;
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
+ 	};
+ 
+     };
++
++    lp5569_1: lp5569_1@32 {
++	compatible = "national,lp5569";
++	reg = <0x32>;
++	clock-mode = /bits/ 8 <1>;
++
++	chan0 {
++		chan-name = "d1";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan1 {
++		chan-name = "d2";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan2 {
++		chan-name = "d3";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan3 {
++		chan-name = "d4";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan4 {
++		chan-name = "d5";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan5 {
++		chan-name = "d6";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan6 {
++		chan-name = "d7";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan7 {
++		chan-name = "d8";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan8 {
++		chan-name = "d9";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++    };
++
++lp5569_2: lp5569_2@33 {
++	compatible = "national,lp5569";
++	reg = <0x33>;
++	clock-mode = /bits/ 8 <1>;
++
++	chan0 {
++		chan-name = "d1";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan1 {
++		chan-name = "d2";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan2 {
++		chan-name = "d3";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan3 {
++		chan-name = "d4";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan4 {
++		chan-name = "d5";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan5 {
++		chan-name = "d6";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan6 {
++		chan-name = "d7";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan7 {
++		chan-name = "d8";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan8 {
++		chan-name = "d9";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++    };
++
++lp5569_3: lp5569_3@34 {
++	compatible = "national,lp5569";
++	reg = <0x34>;
++	clock-mode = /bits/ 8 <1>;
++
++	chan0 {
++		chan-name = "d1";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan1 {
++		chan-name = "d2";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan2 {
++		chan-name = "d3";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan3 {
++		chan-name = "d4";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan4 {
++		chan-name = "d5";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan5 {
++		chan-name = "d6";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan6 {
++		chan-name = "d7";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan7 {
++		chan-name = "d8";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++	chan8 {
++		chan-name = "d9";
++		led-cur = /bits/ 8 <0xc8>;
++		max-cur = /bits/ 8 <0xc8>;
++	};
++
++    };
++
++
+ };
+ 
+ &lpspi3 {
+diff --git a/arch/arm/configs/imx_v7_android_defconfig b/arch/arm/configs/imx_v7_android_defconfig
+index d4f37e1..858cdc4 100755
+--- a/arch/arm/configs/imx_v7_android_defconfig
++++ b/arch/arm/configs/imx_v7_android_defconfig
+@@ -539,6 +539,7 @@ CONFIG_LEDS_GPIO=y
+ CONFIG_LEDS_TRIGGER_HEARTBEAT=y
+ CONFIG_RTC_CLASS=y
+ CONFIG_RTC_DRV_MXC=y
++CONFIG_LEDS_LP5569=y
+ CONFIG_RTC_DRV_SNVS=y
+ CONFIG_RTC_DRV_IMX_RPMSG=y
+ CONFIG_DMADEVICES=y
+diff --git a/drivers/leds/Kconfig b/drivers/leds/Kconfig
+index 7a628c6..8b3bfb3 100644
+--- a/drivers/leds/Kconfig
++++ b/drivers/leds/Kconfig
+@@ -243,12 +243,13 @@ config LEDS_LP3952
+ 	  module will be called leds-lp3952.
+ 
+ config LEDS_LP55XX_COMMON
+-	tristate "Common Driver for TI/National LP5521/5523/55231/5562/8501"
+-	depends on LEDS_LP5521 || LEDS_LP5523 || LEDS_LP5562 || LEDS_LP8501
++	tristate "Common Driver for TI/National LP5521/5523/55231/5562/5569/8501"
++	depends on LEDS_LP5521 || LEDS_LP5523 || LEDS_LP5562 || LEDS_LP5569 ||LEDS_LP8501
+ 	select FW_LOADER
+ 	select FW_LOADER_USER_HELPER
++	default y
+ 	help
+-	  This option supports common operations for LP5521/5523/55231/5562/8501
++	  This option supports common operations for LP5521/5523/55231/5562/5569/8501
+ 	  devices.
+ 
+ config LEDS_LP5521
+@@ -282,6 +283,17 @@ config LEDS_LP5562
+ 	  Driver provides direct control via LED class and interface for
+ 	  programming the engines.
+ 
++config LEDS_LP5569
++	tristate "LED Support for TI LP5569 LED driver chip"
++	depends on LEDS_CLASS && I2C
++	select LEDS_LP55XX_COMMON
++	default y
++	help
++	  If you say yes here you get support for TI LP5569 LED driver.
++	  It is 4 channels chip with programmable engines.
++	  Driver provides direct control via LED class and interface for
++	  programming the engines.
++
+ config LEDS_LP8501
+ 	tristate "LED Support for TI LP8501 LED driver chip"
+ 	depends on LEDS_CLASS && I2C
+diff --git a/drivers/leds/Makefile b/drivers/leds/Makefile
+index 3965070..14f0aec 100644
+--- a/drivers/leds/Makefile
++++ b/drivers/leds/Makefile
+@@ -31,6 +31,7 @@ obj-$(CONFIG_LEDS_LP55XX_COMMON)	+= leds-lp55xx-common.o
+ obj-$(CONFIG_LEDS_LP5521)		+= leds-lp5521.o
+ obj-$(CONFIG_LEDS_LP5523)		+= leds-lp5523.o
+ obj-$(CONFIG_LEDS_LP5562)		+= leds-lp5562.o
++obj-$(CONFIG_LEDS_LP5569)		+= leds-lp5569.o
+ obj-$(CONFIG_LEDS_LP8501)		+= leds-lp8501.o
+ obj-$(CONFIG_LEDS_LP8788)		+= leds-lp8788.o
+ obj-$(CONFIG_LEDS_LP8860)		+= leds-lp8860.o
